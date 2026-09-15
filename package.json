@@ -1,0 +1,28 @@
+{
+  "name": "localfig",
+  "version": "0.4.0",
+  "description": "The Figma desktop app as an MCP server: the full Plugin API for AI agents, on your machine. No cloud API, no token, no quota.",
+  "license": "MIT",
+  "type": "module",
+  "main": "server.mjs",
+  "bin": { "localfig": "server.mjs" },
+  "mcpName": "io.github.LucasGorgal/localfig",
+  "repository": { "type": "git", "url": "https://github.com/LucasGorgal/localfig.git" },
+  "homepage": "https://github.com/LucasGorgal/localfig#readme",
+  "bugs": { "url": "https://github.com/LucasGorgal/localfig/issues" },
+  "files": [
+    "server.mjs",
+    "plugin/manifest.json",
+    "plugin/code.js",
+    "plugin/ui.template.html",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "setup": "node server.mjs --setup",
+    "start": "node server.mjs",
+    "test": "node test-e2e.mjs"
+  },
+  "engines": { "node": ">=18" },
+  "keywords": ["figma", "mcp", "model-context-protocol", "chatgpt", "codex", "gemini", "claude", "claude-code", "cursor", "figma-plugin", "design", "local", "agent", "vscode", "windsurf", "cline", "gemini-cli", "zed"]
+}

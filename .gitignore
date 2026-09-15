@@ -1,0 +1,12 @@
+.token
+exports/
+plugin/ui.html
+node_modules/
+.bak/
+*.tgz
+.DS_Store
+Thumbs.db
+mcp-publisher
+mcp-publisher.exe
+mcp-publisher.tar.gz
+.mcpregistry_*

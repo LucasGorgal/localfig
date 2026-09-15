@@ -1,0 +1,20 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.LucasGorgal/localfig",
+  "description": "The Figma desktop app as an MCP server: full Plugin API for AI agents. Local, no token, no quota.",
+  "repository": {
+    "url": "https://github.com/LucasGorgal/localfig",
+    "source": "github"
+  },
+  "version": "0.4.0",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "localfig",
+      "version": "0.4.0",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}

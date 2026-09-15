@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8" />
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    font: 12px/1.45 "Inter", system-ui, sans-serif;
+    margin: 0; padding: 14px;
+    color: var(--figma-color-text, #111);
+    background: var(--figma-color-bg, #fff);
+  }
+  .row { display: flex; align-items: center; gap: 8px; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: #d0d0d0; flex: none; }
+  .dot.on { background: #14ae5c; }
+  .dot.err { background: #e03e3e; }
+  h1 { font-size: 12px; font-weight: 600; margin: 0; }
+  .meta { color: var(--figma-color-text-secondary, #777); margin-top: 8px; word-break: break-word; }
+  .count { font-variant-numeric: tabular-nums; }
+  button {
+    margin-top: 12px; width: 100%; padding: 7px 10px;
+    border: 1px solid var(--figma-color-border, #ddd); border-radius: 6px;
+    background: var(--figma-color-bg-secondary, #f5f5f5);
+    color: inherit; font: inherit; cursor: pointer;
+  }
+  button:hover { background: var(--figma-color-bg-hover, #ebebeb); }
+</style>
+</head>
+<body>
+  <div class="row"><span class="dot" id="dot"></span><h1 id="state">Connecting…</h1></div>
+  <div class="meta" id="meta">Bridge: localhost:__PORT__</div>
+  <div class="meta">Commands handled: <span class="count" id="n">0</span></div>
+  <button id="stop">Stop bridge</button>
+
+<script>
+(function () {
+  var BASE = 'http://localhost:__PORT__';
+  var T = '__TOKEN__';
+  var dot = document.getElementById('dot');
+  var state = document.getElementById('state');
+  var meta = document.getElementById('meta');
+  var nEl = document.getElementById('n');
+  var handled = 0;
+  var alive = true;
+  var backoff = 500;
+
+  document.getElementById('stop').onclick = function () {
+    alive = false;
+    parent.postMessage({ pluginMessage: { stop: true } }, '*');
+  };
+
+  function status(cls, text, sub) {
+    dot.className = 'dot' + (cls ? ' ' + cls : '');
+    state.textContent = text;
+    if (sub !== undefined) meta.textContent = sub;
+  }
+
+  // ---- messages coming back from the plugin main thread ----
+  onmessage = async function (e) {
+    var m = e.data && e.data.pluginMessage;
+    if (!m) return;
+
+    if (m.helloPayload) {
+      try {
+        await fetch(BASE + '/hello?t=' + T, {
+          method: 'POST',
+          body: JSON.stringify(m.helloPayload),
+        });
+        status('on', 'Connected to localfig', m.helloPayload.fileName || '');
+      } catch (err) { status('err', 'Bridge offline', String(err)); }
+      return;
+    }
+
+    if (m.reply) {
+      var reply = m.reply;
+      try {
+        // Ship any exported bytes first; swap them for on-disk paths.
+        if (reply.blobs && reply.blobs.length) {
+          var files = [];
+          for (var i = 0; i < reply.blobs.length; i++) {
+            var b = reply.blobs[i];
+            var r = await fetch(BASE + '/blob?t=' + T + '&name=' + encodeURIComponent(b.name), {
+              method: 'POST',
+              body: new Blob([b.bytes]),
+            });
+            var j = await r.json();
+            files.push({ name: b.name, path: j.path, bytes: j.bytes });
+          }
+          if (reply.result && reply.result.exported) {
+            for (var k = 0; k < reply.result.exported.length; k++) {
+              var match = files.filter(function (f) { return f.name === reply.result.exported[k].file; })[0];
+              if (match) {
+                reply.result.exported[k].path = match.path;
+                reply.result.exported[k].bytes = match.bytes;
+              }
+            }
+          } else {
+            reply.result = reply.result || {};
+            reply.result.files = files;
+          }
+        }
+        delete reply.blobs;
+        await fetch(BASE + '/result?t=' + T, { method: 'POST', body: JSON.stringify(reply) });
+        handled++;
+        nEl.textContent = String(handled);
+      } catch (err) {
+        try {
+          await fetch(BASE + '/result?t=' + T, {
+            method: 'POST',
+            body: JSON.stringify({ id: reply.id, ok: false, error: 'ui relay failed: ' + err }),
+          });
+        } catch (e2) { /* bridge is gone; the poll loop will report it */ }
+      }
+    }
+  };
+
+  // Figma's createImage rejects anything over 4096px per side and only decodes PNG/JPG/GIF.
+  // This iframe is a full browser: decode whatever Chromium can (WebP, BMP, AVIF...), downscale
+  // when needed, and hand the main thread a PNG/JPEG it accepts. No dependencies anywhere.
+  async function prepareImage(arrayBuffer, maxSide, name) {
+    var info = { originalBytes: arrayBuffer.byteLength };
+    var bmp;
+    try { bmp = await createImageBitmap(new Blob([arrayBuffer])); }
+    catch (e) { info.note = 'not decodable in the plugin UI (' + e + '); passed through unchanged'; return { bytes: new Uint8Array(arrayBuffer), info: info }; }
+    info.width = bmp.width; info.height = bmp.height;
+    var nativeFormat = /\.(png|jpe?g|gif)$/i.test(name);
+    var needsResize = bmp.width > maxSide || bmp.height > maxSide;
+    if (!needsResize && nativeFormat) { bmp.close(); return { bytes: new Uint8Array(arrayBuffer), info: info }; }
+    var scale = needsResize ? Math.min(maxSide / bmp.width, maxSide / bmp.height) : 1;
+    var w = Math.max(1, Math.round(bmp.width * scale)), h = Math.max(1, Math.round(bmp.height * scale));
+    var canvas = document.createElement('canvas'); canvas.width = w; canvas.height = h;
+    var ctx = canvas.getContext('2d'); ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(bmp, 0, 0, w, h); bmp.close();
+    var mime = /\.jpe?g$/i.test(name) ? 'image/jpeg' : 'image/png';
+    var blob = await new Promise(function (resolve) { canvas.toBlob(resolve, mime, 0.92); });
+    var out = new Uint8Array(await blob.arrayBuffer());
+    info.placedWidth = w; info.placedHeight = h; info.encodedAs = mime; info.placedBytes = out.length;
+    if (needsResize) info.resized = true;
+    if (!nativeFormat) info.converted = true;
+    return { bytes: out, info: info };
+  }
+
+  // ---- long-poll loop ----
+  async function loop() {
+    parent.postMessage({ pluginMessage: { hello: true } }, '*');
+    while (alive) {
+      try {
+        var res = await fetch(BASE + '/poll?t=' + T, { method: 'GET' });
+        if (res.status === 401) { status('err', 'Token rejected', 'Restart the plugin after the server restarts'); await sleep(3000); continue; }
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        backoff = 500;
+        if (dot.className.indexOf('on') < 0) {
+          status('on', 'Connected to localfig');
+          parent.postMessage({ pluginMessage: { hello: true } }, '*'); // re-register: the owner may be a new process
+        }
+        var cmd = await res.json();
+        if (cmd && cmd.id) {
+          // Commands that carry bytes INTO Figma: fetch them here, in the iframe.
+          if (cmd.payload && cmd.payload.assetId) {
+            var ab = await fetch(BASE + '/asset?t=' + T + '&id=' + cmd.payload.assetId).then(function (r) { return r.arrayBuffer(); });
+            var prepared = await prepareImage(ab, cmd.payload.maxSide || 4096, cmd.payload.name || '');
+            cmd.payload.bytes = prepared.bytes;
+            cmd.payload.prepared = prepared.info;
+          }
+          parent.postMessage({ pluginMessage: { command: cmd } }, '*');
+        }
+      } catch (err) {
+        status('err', 'Bridge offline', 'Retrying — is the MCP server running?');
+        await sleep(backoff);
+        backoff = Math.min(backoff * 2, 5000);
+      }
+    }
+  }
+  function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+  loop();
+})();
+</script>
+</body>
+</html>

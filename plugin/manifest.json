@@ -1,0 +1,18 @@
+{
+  "name": "localfig",
+  "id": "localfig-bridge",
+  "api": "1.0.0",
+  "main": "code.js",
+  "ui": "ui.html",
+  "editorType": ["figma", "figjam", "slides"],
+  "documentAccess": "dynamic-page",
+  "permissions": ["teamlibrary", "currentuser"],
+  "relaunchButtons": [
+    { "command": "open", "name": "Reconnect localfig" }
+  ],
+  "networkAccess": {
+    "allowedDomains": ["http://localhost:8765"],
+    "devAllowedDomains": ["http://localhost:8765"],
+    "reasoning": "Talks to the localfig MCP bridge on this machine only."
+  }
+}
