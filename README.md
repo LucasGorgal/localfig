@@ -19,7 +19,7 @@ MCP client  --stdio JSON-RPC-->  localfig  --http localhost:8765-->  Figma plugi
 | Arbitrary Plugin API JavaScript | **yes** (`figma_eval`) | no | no | no |
 | Quota / login | none | plan-dependent | token + rate limits | none |
 | Tokens, styles, components read back | `figma_tokens`, `figma_metadata` | yes, incl. Code Connect | partial | rarely |
-| Renders back to the agent | inline images | yes | no | varies |
+| Agent can see the design as an image | yes, inline in the response | yes | files or links, not inline | varies |
 | Undo per agent step, change tracking | yes | no | no | no |
 
 ## Requirements
