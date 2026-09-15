@@ -1,0 +1,15 @@
+{
+  "$schema": "https://glama.ai/mcp/schemas/server.json",
+  "maintainers": ["LucasGorgal"],
+  "name": "localfig",
+  "title": "localfig",
+  "description": "The Figma desktop app as an MCP server: the full Figma Plugin API for AI agents through a local development plugin. Runs over stdio on your machine, with no Figma cloud API, token or quota.",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/LucasGorgal/localfig"
+  },
+  "homepage": "https://github.com/LucasGorgal/localfig#readme",
+  "transport": "stdio",
+  "dockerfile": "glama/Dockerfile",
+  "tags": ["mcp", "model-context-protocol", "figma", "figma-plugin", "design", "local"]
+}
