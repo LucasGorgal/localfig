@@ -1,6 +1,6 @@
 {
   "name": "localfig",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "The Figma desktop app as an MCP server: the full Plugin API for AI agents, on your machine. No cloud API, no token, no quota.",
   "license": "MIT",
   "type": "module",

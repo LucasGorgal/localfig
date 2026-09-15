@@ -23,7 +23,7 @@ const PORT = Number(process.env.LOCALFIG_PORT || process.env.FIGMA_BRIDGE_PORT |
 const HOST = '127.0.0.1';
 const OUT_DIR = process.env.LOCALFIG_OUT || process.env.FIGMA_BRIDGE_OUT || path.join(HOME, 'exports');
 const PLUGIN_DIR = path.join(HOME, 'plugin');
-const VERSION = '0.4.0';
+const VERSION = '0.4.1';
 const POLL_HOLD_MS = 25000;
 const DEFAULT_TIMEOUT_MS = 60000;
 
@@ -584,157 +584,163 @@ function inlineImages(out) {
 }
 
 /* ---------------------------------------------------------------- tools --- */
-const EVAL_DOC = [
-  'Run JavaScript inside the Figma plugin sandbox, against the file where the bridge plugin is running.',
-  '',
-  '- The code body is wrapped in an async function: top-level await and return both work.',
-  '- Globals: figma (full Plugin API) and helpers.',
-  '- Use figma.getNodeByIdAsync(id) — the sync getNodeById is unavailable under dynamic-page access.',
-  '- Switch pages with: await figma.setCurrentPageAsync(page)',
-  '- Load fonts before ANY text mutation, or use helpers.setText / helpers.loadNodeFonts.',
-  '- The return value is JSON-serialized (figma.mixed -> "mixed", cycles pruned). Real Figma nodes collapse to {id,name,type}; return plain data (ids, numbers, strings) instead.',
-  '- resize() RESETS sizing: on TEXT it sets textAutoResize to NONE (resize first, then set textAutoResize = "HEIGHT"); on auto-layout frames it sets both sizing modes to FIXED (set them after resizing, or use helpers.set / helpers.createText, which order this correctly).',
-  '- Heights of text and hug-sized frames read back correctly right after the change — if you see h=10 on a text you resized, the auto-resize was reset (see above).',
-  '- Each mutating tool call becomes ONE undo step for the person (checkpointed with figma.commitUndo); figma_history {action:"undo"} reverts the last call if asked within 60 s. Call helpers.reveal(nodes) at the end so what you built is on their screen.',
-  '- For structure + styles (fills, fonts, effects, auto-layout, bound variables, components) of an existing frame, prefer figma_metadata with styles:true over a hand-written walker; figma_tokens lists the file\'s variable collections and styles.',
-  '',
-  'helpers: setText(node, chars), loadNodeFonts(node), createText({characters, font:{family,style}, fontSize, color:"#hex", width, lineHeight(%), letterSpacing(px), textCase, textAlign, name, parent, x, y}), rgb("#hex"), set(node, props), query(root, selector), createAutoLayout(dir, props), reveal(nodes), notify(msg), rgba("#hex8"), collection(name, [modes]), token(collection, name, "COLOR"|"FLOAT"|"STRING"|"BOOLEAN", value | {mode: value}), bind(node, "fills"|"strokes"|prop, variable), importComponent(key), instance(key, parent, props), command(kind, payload) — runs a typed command (tokens, metadata, find, changes...) from inside eval and returns {result}.',
-].join('\n');
+const EVAL_DOC = `Run JavaScript against the Figma file where the localfig plugin is open, with the full Figma Plugin API. Use it to create, edit, move or delete nodes, and for anything the other tools do not cover. For reading a design, prefer figma_metadata, figma_find and figma_tokens; for images from disk, use figma_place_image.
+
+Behavior: the code can change or delete anything in the file. Each call is one undo step for the person, and figma_history can undo it within 60 seconds. Returns the JSON-serialized value of your return statement. Return plain data such as ids, names and numbers, because Figma nodes collapse to {id, name, type}.
+
+Code rules:
+- The body runs inside an async function, so await and return both work. Globals: figma and helpers.
+- Use await figma.getNodeByIdAsync(id); the synchronous getNodeById is unavailable. Switch pages with await figma.setCurrentPageAsync(page).
+- Load fonts before changing text, or use helpers.setText.
+- resize() resets text auto-resize and auto-layout sizing modes, so set those after resizing, or use helpers.set and helpers.createText, which do it in the right order.
+- End with helpers.reveal(nodes) so the person sees what changed.
+
+helpers: setText(node, chars), loadNodeFonts(node), createText({characters, font, fontSize, color, width, lineHeight, letterSpacing, name, parent, x, y}), set(node, props), rgb("#rrggbb"), rgba("#rrggbbaa"), query(root, selector), createAutoLayout(direction, props), reveal(nodes), notify(message), collection(name, modes), token(collection, name, type, value), bind(node, property, variable), importComponent(key), instance(key, parent, props), command(kind, payload).`;
 
 const TOOLS = [
   {
     name: 'figma_status',
+    title: 'Figma connection status',
     annotations: { readOnlyHint: true, openWorldHint: false },
-    description: 'Bridge + plugin health: is the Figma plugin connected, which file/page is open, current selection, and whether dynamic code execution is available.',
+    description: `Check whether localfig can reach Figma and what the plugin is looking at. Call it first in a session, whenever another tool reports that no plugin is connected or times out, and after the person switches files. Read-only. Returns the bridge state: owner or client, version and export folder. When the Figma plugin is connected it also returns the file name, editor type, current page, all pages, the current selection, the top-level layers of the page with positions and sizes, the signed-in user's name when available, and whether code execution is available for figma_eval. When the plugin is not connected, the result explains how to start it in Figma.`,
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
   },
   {
     name: 'figma_eval',
-    annotations: { openWorldHint: false },
+    title: 'Run Figma Plugin API code',
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
     description: EVAL_DOC,
     inputSchema: {
       type: 'object',
       properties: {
-        code: { type: 'string', description: 'JavaScript to run. Use return to send data back.' },
-        timeoutMs: { type: 'number', description: 'Default 60000.' },
+        code: { type: 'string', description: `JavaScript body to run. Use return to send JSON-serializable data back, for example: const n = await figma.getNodeByIdAsync("10:59"); return { id: n.id, name: n.name };` },
+        timeoutMs: { type: 'integer', minimum: 1000, default: 60000, description: `How long to wait for the code to finish, in milliseconds. Raise it for long batch edits. Default 60000.` },
       },
       required: ['code'], additionalProperties: false,
     },
   },
   {
     name: 'figma_metadata',
+    title: 'Read the layer tree',
     annotations: { readOnlyHint: true, openWorldHint: false },
-    description: 'Structural dump of a node subtree (id, name, type, x/y/w/h, text characters). Omit nodeId for the current page. Cheap way to find node IDs before editing. Pass styles:true to also get fills, strokes, effects, opacity, corner radius, auto-layout and text styles per node — plus bound variables (token names), named styles, and for instances the main component and its property values. css:true adds the CSS Figma computes per node.',
+    description: `Read the layer tree of a node or of the current page: ids, names, types, positions, sizes and text content. Use it to understand an existing design and to get node ids before editing with figma_eval. To search a large file by name or text, use figma_find instead; for the file's variables and styles, use figma_tokens. Read-only. With styles:true each node also lists its fills, strokes, effects, corner radius, auto-layout, fonts, bound variables, named styles and component properties; css:true adds the CSS Figma generates for each node. Returns {tree, nodeCount, truncated}; reading stops at maxNodes and sets truncated to true.`,
     inputSchema: {
       type: 'object',
       properties: {
-        nodeId: { type: 'string', description: 'e.g. "10:59". Omit for the current page.' },
-        depth: { type: 'number', description: 'Levels to descend (default 6).' },
-        maxNodes: { type: 'number', description: 'Node cap (default 400).' },
-        styles: { type: 'boolean', description: 'Include fills, strokes, effects, opacity, corner radius, auto-layout and text styles (font, size, line-height, spacing, case) per node. Default false.' },
-        css: { type: 'boolean', description: 'Include the CSS Figma computes for each node (getCSSAsync) — the design-to-code handoff. Default false.' },
+        nodeId: { type: 'string', description: `Id of the node to start from, as returned by figma_find or figma_status, for example "10:59". Omit to read the whole current page.` },
+        depth: { type: 'integer', minimum: 0, default: 6, description: `How many levels of children to include below the starting node. 0 returns only that node. Default 6.` },
+        maxNodes: { type: 'integer', minimum: 1, default: 400, description: `Stop after this many nodes and set truncated to true. Default 400.` },
+        styles: { type: 'boolean', default: false, description: `Add visual properties to every node: fills, strokes, effects, opacity, corner radius, auto-layout, fonts, bound variables, named styles and component properties. Default false.` },
+        css: { type: 'boolean', default: false, description: `Add the CSS Figma generates for each node, for design-to-code handoff. Default false.` },
       }, additionalProperties: false,
     },
   },
   {
     name: 'figma_export',
-    annotations: { idempotentHint: true, openWorldHint: false },
-    description: 'Export nodes to local files. PNG/JPG (up to 2 MB each) are attached inline as images — the screenshot path. JSON = the subtree in Figma REST API shape (JSON_REST_V1), for design-to-code tooling; SVG and JSON also come back inline as text (up to 200 KB).',
+    title: 'Export or render nodes',
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    description: `Render nodes to image or data files, to see a design or hand it off. Use PNG to check your work visually: PNG and JPG results up to 2 MB come back inline as images. Use SVG for icons and vector assets, PDF for print, and JSON for the node tree in Figma REST API format, which design-to-code tools read; SVG and JSON up to 200 KB also come back inline as text. For layer structure without rendering, use figma_metadata. Does not change the Figma file. Writes files to the localfig exports folder, replacing files with the same name. Omitting nodeIds exports the current selection. Returns {exported}: one entry per node with its file name, path, size in bytes and, for SVG or JSON, the text.`,
     inputSchema: {
       type: 'object',
       properties: {
-        nodeIds: { type: 'array', items: { type: 'string' }, description: 'Node IDs to export. Omit to export the current selection.' },
-        format: { type: 'string', enum: ['PNG', 'JPG', 'SVG', 'PDF', 'JSON'], description: 'Default PNG. JSON = Figma REST API shape.' },
-        scale: { type: 'number', description: 'Raster scale, default 1. Use 0.5 for quick looks.' },
-        inline: { type: 'boolean', description: 'Attach PNG/JPG results as image content (default true). Set false when exporting many nodes or when only the files are needed.' },
-        contentsOnly: { type: 'boolean', description: 'Export only the node contents, excluding overlapping siblings (Figma default: true).' },
-        useAbsoluteBounds: { type: 'boolean', description: 'Include the full bounds incl. effects such as shadows.' },
+        nodeIds: { type: 'array', items: { type: 'string' }, description: `Ids of the nodes to export, for example ["10:59"]. Omit to export the nodes selected in Figma; the call fails if nothing is selected.` },
+        format: { type: 'string', enum: ['PNG', 'JPG', 'SVG', 'PDF', 'JSON'], default: 'PNG', description: `PNG or JPG for images, SVG for vectors, PDF for print, JSON for the node tree in Figma REST API format. Default PNG.` },
+        scale: { type: 'number', exclusiveMinimum: 0, default: 1, description: `PNG and JPG only. Size multiplier: 1 is actual size, 2 is double resolution, 0.5 is a quick preview. Default 1.` },
+        inline: { type: 'boolean', default: true, description: `Return PNG and JPG results as images in the response. Set false for large batches when only the files are needed. Default true.` },
+        contentsOnly: { type: 'boolean', default: true, description: `Export only this node, ignoring other layers that overlap it. Default true.` },
+        useAbsoluteBounds: { type: 'boolean', default: false, description: `Use the node's full dimensions even where it is cropped or surrounded by empty space, for example to export text layers without cropping. Default false.` },
       }, additionalProperties: false,
     },
   },
   {
     name: 'figma_tokens',
+    title: 'Read design tokens and styles',
     annotations: { readOnlyHint: true, openWorldHint: false },
-    description: 'Design tokens and styles of the open file: every local variable collection with its modes and per-mode values (colors as hex, aliases as {name}), plus local paint/text/effect styles. Read this before generating code or building on a design system; figma_metadata with styles:true then tells you what each node is bound to.',
+    description: `List the design system defined in the open file: every local variable collection with its modes and each variable's value per mode, plus local paint, text and effect styles. Use it before generating code from a design or building new screens, so you reuse existing tokens instead of hard-coding colors and sizes. Variables from team libraries are not included; use figma_library for those. To see which token a specific node uses, call figma_metadata with styles:true. Read-only. Colors are hex strings and aliases appear as {variable name}. Returns {collections, styles, counts}.`,
     inputSchema: {
       type: 'object',
       properties: {
-        collection: { type: 'string', description: 'Only collections whose name contains this (case-insensitive).' },
-        includeStyles: { type: 'boolean', description: 'Include local paint/text/effect styles. Default true.' },
-        maxVariables: { type: 'number', description: 'Cap on variables returned (default 2000).' },
+        collection: { type: 'string', description: `Only return collections whose name contains this text, case-insensitive, for example "Brand". Omit for all collections.` },
+        includeStyles: { type: 'boolean', default: true, description: `Include local paint, text and effect styles. Default true.` },
+        maxVariables: { type: 'integer', minimum: 1, default: 2000, description: `Stop after this many variables in total; the collection being read when the limit is reached is marked truncated. Default 2000.` },
       }, additionalProperties: false,
     },
   },
   {
     name: 'figma_find',
+    title: 'Find nodes',
     annotations: { readOnlyHint: true, openWorldHint: false },
-    description: 'Search the current page (or all pages) for nodes by type, layer-name pattern and/or text content. Returns ids, names and positions — the way to locate things in a big file before editing.',
+    description: `Search the file for nodes by type, layer name or text content. Use it to locate things in a large file before reading them with figma_metadata or editing them with figma_eval. To browse one known frame, use figma_metadata instead. Read-only. Filters combine, so a node must match every filter given; with no filters, every node is listed up to the limit. Searching all pages first loads every page, which is slower on big files. Returns {hits, scanned, pages, truncated}. Each hit has id, name, type, page, position and size, plus the first 120 characters for text nodes.`,
     inputSchema: {
       type: 'object',
       properties: {
-        types: { type: 'array', items: { type: 'string' }, description: 'Node types, e.g. ["TEXT"] or ["FRAME","INSTANCE"]. Omit for any type.' },
-        name: { type: 'string', description: 'Case-insensitive regex matched against the layer name.' },
-        text: { type: 'string', description: 'Case-insensitive regex matched against text content (TEXT nodes only).' },
-        scope: { type: 'string', enum: ['current', 'all'], description: 'Current page (default) or every page.' },
-        limit: { type: 'number', description: 'Max hits (default 200).' },
+        types: { type: 'array', items: { type: 'string' }, description: `Node types to include, in capitals, for example ["TEXT"] or ["FRAME", "INSTANCE", "COMPONENT"]. Omit to include every type.` },
+        name: { type: 'string', description: `Regular expression matched against layer names, case-insensitive, for example "button" or "^Card".` },
+        text: { type: 'string', description: `Regular expression matched against the text of TEXT nodes, case-insensitive. When set, other node types never match.` },
+        scope: { type: 'string', enum: ['current', 'all'], default: 'current', description: `"current" searches the page open in Figma; "all" loads and searches every page, which is slower. Default current.` },
+        limit: { type: 'integer', minimum: 1, default: 200, description: `Maximum number of hits to return; truncated is true when the limit was reached. Default 200.` },
       }, additionalProperties: false,
     },
   },
   {
     name: 'figma_changes',
+    title: 'Recent changes in the file',
     annotations: { readOnlyHint: true, openWorldHint: false },
-    description: 'What changed in the file since a previous call: node creations, deletions and property changes recorded by the plugin, with a per-node summary. Changes made by tool calls are tagged byPlugin (heuristic: they arrive during, or within 2 s after, a mutating call) and hidden by default, so this shows what the person edited in Figma between your calls. Pass back the returned seq as since.',
+    description: `Report what changed in the file since your last check: nodes created, deleted or edited, with the properties that changed. Use it before editing a design the person may have touched, so you do not overwrite their work, and pass the returned seq as since on the next call. Edits made by localfig's own tools are hidden unless includePlugin is true. They are recognized by timing, so an edit the person makes within two seconds of a tool call can be misattributed. Only pages the plugin has seen are tracked, and the buffer keeps the last 1000 changes. Read-only. Returns {seq, total, returned, summary, changes}, where summary groups the listed changes per node.`,
     inputSchema: {
       type: 'object',
       properties: {
-        since: { type: 'number', description: 'seq from the previous call. Omit for everything buffered (last 1000 changes).' },
-        includePlugin: { type: 'boolean', description: 'Also list changes caused by tool calls. Default false.' },
-        limit: { type: 'number', description: 'Max entries returned, newest kept (default 200).' },
+        since: { type: 'integer', minimum: 0, description: `The seq value returned by your previous call; only newer changes are returned. Omit to get everything still in the buffer.` },
+        includePlugin: { type: 'boolean', default: false, description: `Also include edits made by localfig's own tools. Default false.` },
+        limit: { type: 'integer', minimum: 1, default: 200, description: `Maximum number of changes to list, keeping the newest. The summary covers only the listed changes. Default 200.` },
       }, additionalProperties: false,
     },
   },
   {
     name: 'figma_history',
-    annotations: { openWorldHint: false },
-    description: 'snapshot: save a named version to the file\'s version history — a restore point before risky edits. undo: revert the edits of the last mutating tool call (figma_eval / figma_place_image / library import) if it ran within the last 60 s; after that they are committed to the file\'s undo history as one step per call, where the person can Ctrl+Z them.',
+    title: 'Save a version or undo',
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
+    description: `Save a restore point, or undo localfig's most recent edit. action "snapshot" saves a named version to the file's version history, which the person can restore from Figma; use it before large or risky changes. action "undo" reverts every edit made by the most recent figma_eval, figma_place_image or figma_library import, but only within 60 seconds of that call; after that, the person can still press Ctrl+Z in Figma, where each tool call is one undo step. Snapshot adds a version and changes nothing else; undo modifies the file. Returns {ok, action}, plus the title and version id for a snapshot.`,
     inputSchema: {
       type: 'object',
       properties: {
-        action: { type: 'string', enum: ['snapshot', 'undo'] },
-        title: { type: 'string', description: 'snapshot: version title (default "localfig <timestamp>").' },
-        description: { type: 'string', description: 'snapshot: version description.' },
+        action: { type: 'string', enum: ['snapshot', 'undo'], description: `"snapshot" saves a named version of the file; "undo" reverts the last editing tool call if it ran within the last 60 seconds.` },
+        title: { type: 'string', description: `Snapshot only. Name for the version, for example "Before redesign". Default "localfig" followed by the current date and time.` },
+        description: { type: 'string', description: `Snapshot only. A longer note stored with the version.` },
       }, required: ['action'], additionalProperties: false,
     },
   },
   {
     name: 'figma_library',
-    annotations: { openWorldHint: false },
-    description: 'Team library access (the plugin manifest asks for the "teamlibrary" permission). collections: list the library variable collections available to this file. variables: list the variables in one collection (collectionKey). import: bring a component / componentSet / style / variable into the file by its library key; for components, instance:true also places an instance (figma_metadata reports component keys on instances).',
+    title: 'Use team library items',
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+    description: `Use components, styles and variables from the team libraries enabled for this file. action "collections" lists the library variable collections available; "variables" lists the variables in one collection; "import" copies one component, component set, style or variable into this file by its key and, for a component, can also place an instance. Use it to build with the team's design system instead of recreating parts. Component keys of existing instances come from figma_metadata with styles:true. Listing is read-only; import adds items to the file and counts as one undo step. Needs the teamlibrary permission, which the localfig plugin requests. Returns the list for collections and variables, or {id, name, kind} plus instanceId for an import.`,
     inputSchema: {
       type: 'object',
       properties: {
-        action: { type: 'string', enum: ['collections', 'variables', 'import'] },
-        collectionKey: { type: 'string', description: 'variables: the collection key from action collections.' },
-        key: { type: 'string', description: 'import: the library key.' },
-        kind: { type: 'string', enum: ['component', 'componentSet', 'style', 'variable'], description: 'import: what the key refers to (default component).' },
-        instance: { type: 'boolean', description: 'import component: also create an instance.' },
-        parentId: { type: 'string', description: 'import: parent node for the instance (default: current page).' },
-        x: { type: 'number' },
-        y: { type: 'number' },
+        action: { type: 'string', enum: ['collections', 'variables', 'import'], description: `"collections" lists library variable collections; "variables" lists the variables in one collection and needs collectionKey; "import" brings one item into the file and needs key.` },
+        collectionKey: { type: 'string', description: `For action "variables": the key of a collection, taken from the collections result.` },
+        key: { type: 'string', description: `For action "import": the library key of the component, component set, style or variable to import.` },
+        kind: { type: 'string', enum: ['component', 'componentSet', 'style', 'variable'], default: 'component', description: `For action "import": what the key refers to. Default component.` },
+        instance: { type: 'boolean', default: false, description: `When importing a component: also place an instance of it in the file. Default false.` },
+        parentId: { type: 'string', description: `For a placed instance: id of the frame or page that receives it. Default is the current page.` },
+        x: { type: 'number', description: `For a placed instance: horizontal position in pixels, relative to its parent.` },
+        y: { type: 'number', description: `For a placed instance: vertical position in pixels, relative to its parent.` },
       }, required: ['action'], additionalProperties: false,
     },
   },
   {
     name: 'figma_place_image',
-    annotations: { openWorldHint: false },
-    description: 'Put a local image file into a node as an image fill. Any format the browser decodes (PNG, JPG, WebP, GIF, BMP, AVIF...): images over 4096px per side are downscaled automatically in the plugin UI and non-native formats are converted to PNG. The result reports what was done (prepared).',
+    title: 'Place an image',
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
+    description: `Fill a node with a local image file, such as a photo or an illustration. Use it instead of figma_eval whenever the image comes from disk. The node must support fills, like a rectangle, ellipse or frame, and its existing fills are replaced by the image. Any format a browser can read works, including PNG, JPG, WebP, GIF, BMP and AVIF; images larger than maxSide are scaled down first, and formats Figma cannot read are converted to PNG. Counts as one undo step. Returns the image and node sizes, plus a prepared object describing any resizing or conversion.`,
     inputSchema: {
       type: 'object',
       properties: {
-        filePath: { type: 'string', description: 'Absolute path to an image on this machine.' },
-        nodeId: { type: 'string', description: 'Node that receives the image fill.' },
-        scaleMode: { type: 'string', enum: ['FILL', 'FIT', 'CROP', 'TILE'], description: 'Default FILL.' },
-        maxSide: { type: 'number', description: 'Downscale so the longest side is at most this many pixels (default 4096, the Figma limit).' },
+        filePath: { type: 'string', description: `Absolute path of the image file on this computer, for example "C:/Users/me/Pictures/photo.jpg" or "/Users/me/photo.png".` },
+        nodeId: { type: 'string', description: `Id of the node that receives the image, for example "10:59". It must support fills, such as a rectangle, ellipse or frame.` },
+        scaleMode: { type: 'string', enum: ['FILL', 'FIT', 'CROP', 'TILE'], default: 'FILL', description: `FILL covers the whole node and crops the overflow, FIT shows the whole image inside the node, CROP positions it with a crop transform, TILE repeats it. Default FILL.` },
+        maxSide: { type: 'integer', minimum: 1, maximum: 4096, default: 4096, description: `Largest allowed width or height in pixels; larger images are scaled down first. Default 4096, which is also Figma's limit.` },
       },
       required: ['filePath', 'nodeId'], additionalProperties: false,
     },
