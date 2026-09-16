@@ -1,4 +1,5 @@
 # localfig
+[![Listed on mcpservers.org](https://mcpservers.org/badge.svg)](https://mcpservers.org/servers/lucasgorgal/localfig)
 
 **The Figma desktop app as an MCP server.** localfig gives an AI agent the **full Figma Plugin API** on the file you have open — through a tiny dev plugin and a loopback HTTP bridge, entirely on your machine.
 
